@@ -157,4 +157,5 @@ supabase/                SQL migrations for application features
 - Configure `CORS_ORIGINS` with the exact deployed student and admin origins.
 - Set the app URLs and verified email sender for the production domains.
 - Configure all R2 variables together and ensure the public base URL serves uploaded objects if the UI must display them.
-- The app listens on `PORT` or `5000`; configure the deployment platform to provide its assigned port.
+- The app listens on `PORT` or `5000`; configure the deployment platform to provide its assigned port.#   t r a c _ b a c k e n d  
+ 
