@@ -438,7 +438,7 @@ export const getAllRequests = async (req, res) => {
     if (senderIds.length > 0) {
       const { data: users, error: userError } = await supabase
         .from('users')
-        .select('id, id_number, first_name, last_name, role, department, course')
+        .select('id, id_number, first_name, last_name, role, department, course, avatar_url')
         .in('id', senderIds);
       
       if (!userError && users) {
@@ -462,6 +462,7 @@ export const getAllRequests = async (req, res) => {
       return {
         id: request.tracking_code || `REQ-${request.id}`,
         student: request.sender_name || `${userData.first_name || ''} ${userData.last_name || ''}`.trim(),
+        studentPhoto: userData.avatar_url || null,
         idNumber: request.sender_id_number || userData.id_number || '—',
         studentType: studentType,
         document: request.request_type,
@@ -520,7 +521,8 @@ export const getRequestById = async (req, res) => {
       return res.status(404).json({ message: 'Request not found' });
     }
 
-    if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && request.sender_id !== userId) {
+    const isAdmin = req.user.role?.toLowerCase().includes('admin') || req.user.type?.toLowerCase() === 'admin';
+    if (!isAdmin && request.sender_id !== userId) {
       return res.status(403).json({ message: 'You are not authorized to view this request' });
     }
 
@@ -528,7 +530,7 @@ export const getRequestById = async (req, res) => {
     if (request.sender_id) {
       const { data: user, error: userError } = await supabase
         .from('users')
-        .select('id_number, first_name, last_name, middle_name, email, department, course, year_level, year_graduated, role')
+        .select('id_number, first_name, last_name, middle_name, email, department, course, year_level, year_graduated, role, avatar_url')
         .eq('id', request.sender_id)
         .single();
       if (!userError && user) { userData = user; }
@@ -552,6 +554,7 @@ export const getRequestById = async (req, res) => {
       status: request.status, category: request.category, documentType: request.request_type,
       purpose: request.purpose, copies: request.copies,
       studentName: request.sender_name || (userData ? `${userData.first_name || ''} ${userData.last_name || ''}`.trim() : ''),
+      ...(isAdmin ? { studentPhoto: userData?.avatar_url || null } : {}),
       studentId: userData?.id_number || request.sender_id_number || '',
       studentType: studentType, course: userData?.course || '',
       yearLevel: userData?.year_level || '', yearGraduated: userData?.year_graduated || '',
@@ -621,7 +624,7 @@ export const searchRequests = async (req, res) => {
     if (senderIds.length > 0) {
       const { data: requestUsers, error: userError } = await supabase
         .from('users')
-        .select('id, first_name, last_name, id_number, role, department, course')
+        .select('id, first_name, last_name, id_number, role, department, course, avatar_url')
         .in('id', senderIds);
       if (userError) throw userError;
       requestUsers?.forEach(user => { userMap[user.id] = user; });
@@ -638,6 +641,7 @@ export const searchRequests = async (req, res) => {
       return {
         id: request.tracking_code || `REQ-${request.id}`,
         student: request.sender_name || (user.first_name || user.last_name ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : 'Unknown'),
+        studentPhoto: user.avatar_url || null,
         idNumber: request.sender_id_number || user.id_number || '—',
         studentType: user.role === 'alumni' ? 'Alumni' : 'Student',
         document: request.request_type, date: formatDateShort(request.date_sent),

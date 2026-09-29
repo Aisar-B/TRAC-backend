@@ -24,11 +24,11 @@ const router = express.Router();
 
 // Protected routes — user must send valid JWT
 router.post('/request', auth, createRequest);
-router.get('/getrequest', auth, getAllRequests);
+router.get('/getrequest', auth, requireAdmin, getAllRequests);
 router.get('/track/:tracking_code', trackRequestByCode);
 router.get('/requestbyid/:id', auth, getRequestById);
 router.get('/user/requests', auth, getUserRequests);
-router.get('/search', auth, searchRequests);
+router.get('/search', auth, requireAdmin, searchRequests);
 router.get('/requests/all', auth, getAllandallRequests);
 router.get('/user/requests/:trackingCode', auth, getUserRequestDetails);
 router.get('/export/csv', auth, exportRequestsToCSV);

@@ -108,7 +108,7 @@ npm install
 npm run dev
 ```
 
-The development server starts at `http://localhost:5000` by default and uses the `Asia/Manila` timezone. The only npm script currently defined is `dev`; there are no package-defined build, lint, or test scripts.
+The development server starts at `http://localhost:5000` by default and uses the `Asia/Manila` timezone. The backend can be tested with `npm test`.
 
 Run the frontends in separate terminals and point both at this API:
 
@@ -157,5 +157,6 @@ supabase/                SQL migrations for application features
 - Configure `CORS_ORIGINS` with the exact deployed student and admin origins.
 - Set the app URLs and verified email sender for the production domains.
 - Configure all R2 variables together and ensure the public base URL serves uploaded objects if the UI must display them.
-- The app listens on `PORT` or `5000`; configure the deployment platform to provide its assigned port.#   t r a c _ b a c k e n d  
+- The app listens on `PORT` or `5000`; configure the deployment platform to provide its assigned port.#   t r a c _ b a c k e n d 
+ 
  

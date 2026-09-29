@@ -5,12 +5,53 @@ import { generateToken } from '../config/jwt.js';
 import { sendEmail, studentAppUrl } from '../config/email.js';
 import { storageService } from '../services/cloudinaryService.js';
 import { renderEmailHeader } from '../utils/emailLayout.js';
+import {
+  generateVerificationCode,
+  hashVerificationCode,
+  isStrongPassword,
+  VERIFICATION_CODE_TTL_MS
+} from '../utils/emailVerification.js';
 
-// =============================================
-// HELPER: Generate OTP Code
-// =============================================
-const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+const escapeIlikePattern = (value) => value.replace(/[\\%_]/g, '\\$&');
+const normalizeIdNumber = (idNumber) => {
+  const digits = String(idNumber || '').replace(/\D/g, '');
+  return digits.length === 7 ? `${digits.slice(0, 2)}-${digits.slice(2)}` : '';
+};
+
+const findPendingSignupByEmail = (email) => supabase
+  .from('pending_signups')
+  .select('*')
+  .eq('email', email)
+  .maybeSingle();
+
+const sendPendingVerification = async (pending, code) => {
+  try {
+    const result = await sendVerificationEmail(
+      pending.email,
+      code,
+      `${pending.signup_data.first_name} ${pending.signup_data.last_name}`
+    );
+    return result?.success !== false;
+  } catch (error) {
+    console.error('Verification email delivery failed:', error.message);
+    return false;
+  }
+};
+
+const requestPendingResend = async (email) => {
+  const code = generateVerificationCode();
+  const { data, error } = await supabase.rpc('resend_pending_signup', {
+    p_email: email,
+    p_verification_code_hash: hashVerificationCode(code)
+  });
+  if (error) throw error;
+  if (data?.status !== 'sent') return data || { status: 'not_found' };
+
+  const { data: pending, error: pendingError } = await findPendingSignupByEmail(email);
+  if (pendingError || !pending) throw pendingError || new Error('Pending signup not found');
+  const delivered = await sendPendingVerification(pending, code);
+  return { status: delivered ? 'sent' : 'delivery_failed' };
 };
 
 // =============================================
@@ -126,17 +167,28 @@ export const signup = async (req, res) => {
       confirmPassword
     } = req.body;
 
-    if (!email) {
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedIdNumber = normalizeIdNumber(id_number);
+
+    if (!normalizedEmail) {
       return res.status(400).json({ message: 'Email is required' });
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!emailRegex.test(normalizedEmail)) {
       return res.status(400).json({ message: 'Invalid email format' });
     }
 
-    if (password !== confirmPassword) {
+    if (!password || password !== confirmPassword) {
       return res.status(400).json({ message: 'Passwords do not match' });
+    }
+
+    if (!isStrongPassword(password)) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters and contain uppercase, lowercase, number, and special character.' });
+    }
+
+    if (!normalizedIdNumber || !first_name?.trim() || !last_name?.trim()) {
+      return res.status(400).json({ message: 'A valid ID number, first name, and last name are required.' });
     }
 
     if (!['student', 'alumni'].includes(role)) {
@@ -157,62 +209,134 @@ export const signup = async (req, res) => {
       return res.status(400).json({ message: 'Select a course offered by the chosen institute.' });
     }
 
-    // Check if user already exists
-    const { data: existingUser } = await supabase
+    const { data: existingUser, error: existingUserError } = await supabase
       .from('users')
-      .select('id')
-      .eq('email', email)
-      .single();
+      .select('id, is_verified')
+      .ilike('email', escapeIlikePattern(normalizedEmail))
+      .maybeSingle();
+    if (existingUserError) throw existingUserError;
 
     if (existingUser) {
+      if (!existingUser.is_verified) {
+        return res.status(409).json({ message: 'An older unverified signup exists. It must be cleared before you can restart signup.' });
+      }
       return res.status(400).json({ message: 'User with this email already exists' });
     }
 
-    const password_hash = await hashPassword(password);
-
-    // Generate verification OTP
-    const verificationCode = generateOTP();
-    const nowUTC = new Date();
-    const expiresAtUTC = new Date(nowUTC.getTime() + 30 * 60 * 1000); // 30 minutes
-
-    console.log('🔐 Signup - New User (Pending Verification):');
-    console.log('  - ID Number:', id_number);
-    console.log('  - Email:', email);
-    console.log('  - Role:', role);
-    console.log('  - Verification Code:', verificationCode);
-
-    // Create user with is_verified = false
-    const { data: newUser, error } = await supabase.from('users').insert([{
-      role,
-      id_number,
-      last_name,
-      first_name,
-      middle_name,
-      year_level: role === 'student' ? year_level : null,
-      year_graduated: role === 'alumni' ? year_graduated : null,
-      department,
-      course,
-      email,
-      password_hash,
-      is_verified: false,
-      verified_at: null,
-      verification_token: verificationCode,
-      verification_token_expires: expiresAtUTC.toISOString()
-    }]).select().single();
-
-    if (error) {
-      console.error('Signup error:', error);
-      throw error;
+    const { data: existingId, error: existingIdError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id_number', normalizedIdNumber)
+      .maybeSingle();
+    if (existingIdError) throw existingIdError;
+    if (existingId) {
+      return res.status(409).json({ message: 'An account already exists for this ID number.' });
     }
 
-    // Send verification email
-    const fullName = `${first_name} ${last_name}`;
-    await sendVerificationEmail(email, verificationCode, fullName).catch(err => console.log('Verification email failed:', err.message));
+    const { data: pendingByEmail, error: pendingEmailError } = await findPendingSignupByEmail(normalizedEmail);
+    if (pendingEmailError) throw pendingEmailError;
 
-    res.status(201).json({ 
-      message: 'Account created! Please check your email for verification code.',
-      userId: newUser.id,
-      requiresVerification: true
+    if (pendingByEmail) {
+      const pendingExpired = new Date(pendingByEmail.created_at).getTime() <= Date.now() - 24 * 60 * 60 * 1000;
+      if (pendingExpired) {
+        const { error: deleteError } = await supabase.from('pending_signups').delete().eq('id', pendingByEmail.id);
+        if (deleteError) throw deleteError;
+      } else {
+        const passwordMatches = await comparePassword(password, pendingByEmail.password_hash);
+        if (!passwordMatches) {
+          return res.status(400).json({ message: 'User with this email already exists' });
+        }
+
+        const resend = await requestPendingResend(normalizedEmail);
+        if (resend.status === 'cooldown') {
+          return res.status(429).json({
+            message: 'Please wait before requesting another verification code.',
+            retryAfterSeconds: resend.retryAfterSeconds,
+            requiresVerification: true,
+            email: normalizedEmail
+          });
+        }
+        if (resend.status === 'rate_limited') {
+          return res.status(429).json({
+            message: 'The verification resend limit has been reached. Try again later.',
+            requiresVerification: true,
+            email: normalizedEmail,
+            retryAfterSeconds: resend.retryAfterSeconds
+          });
+        }
+        if (resend.status === 'expired' || resend.status === 'not_found') {
+          return res.status(410).json({ message: 'This pending signup expired. Submit the signup form again.', requiresVerification: false });
+        }
+
+        return res.status(resend.status === 'delivery_failed' ? 503 : 200).json({
+          message: resend.status === 'delivery_failed'
+            ? 'Your signup is saved, but we could not send the verification email. Please retry shortly.'
+            : 'Signup resumed. A verification code was sent to your email.',
+          requiresVerification: true,
+          deliveryFailed: resend.status === 'delivery_failed',
+          email: normalizedEmail,
+          retryAfterSeconds: 60
+        });
+      }
+    }
+
+    const { data: pendingById, error: pendingIdError } = await supabase
+      .from('pending_signups')
+      .select('email')
+      .eq('id_number', normalizedIdNumber)
+      .maybeSingle();
+    if (pendingIdError) throw pendingIdError;
+    if (pendingById) {
+      return res.status(409).json({ message: 'A signup is already pending for this ID number.' });
+    }
+
+    const password_hash = await hashPassword(password);
+    const verificationCode = generateVerificationCode();
+    const now = new Date();
+    const signupData = {
+      role,
+      id_number: normalizedIdNumber,
+      last_name: last_name.trim(),
+      first_name: first_name.trim(),
+      middle_name: String(middle_name || '').trim(),
+      year_level: role === 'student' ? year_level : null,
+      year_graduated: role === 'alumni' ? year_graduated : null,
+      department: String(department || '').trim(),
+      course: String(course || '').trim()
+    };
+
+    const { data: pending, error: insertError } = await supabase
+      .from('pending_signups')
+      .insert({
+        email: normalizedEmail,
+        id_number: normalizedIdNumber,
+        signup_data: signupData,
+        password_hash,
+        verification_code_hash: hashVerificationCode(verificationCode),
+        verification_code_expires_at: new Date(now.getTime() + VERIFICATION_CODE_TTL_MS).toISOString(),
+        verification_attempts: 0,
+        resend_count: 0,
+        last_resend_at: now.toISOString()
+      })
+      .select('email, signup_data')
+      .single();
+
+    if (insertError) {
+      if (insertError.code === '23505') {
+        return res.status(409).json({ message: 'A signup using this email or ID number is already pending. Resume it using the original password.' });
+      }
+      throw insertError;
+    }
+
+    const delivered = await sendPendingVerification(pending, verificationCode);
+    return res.status(delivered ? 201 : 503).json({
+      message: delivered
+        ? 'Signup saved. Please check your email for the verification code.'
+        : 'Your signup is saved, but we could not send the verification email. Please retry shortly.',
+      requiresVerification: true,
+      deliveryFailed: !delivered,
+      email: normalizedEmail,
+      retryAfterSeconds: 60
     });
 
   } catch (err) {
@@ -226,61 +350,43 @@ export const signup = async (req, res) => {
 // =============================================
 export const verifyEmail = async (req, res) => {
   try {
-    const { userId, otpCode } = req.body;
+    const email = normalizeEmail(req.body.email);
+    const { otpCode } = req.body;
 
-    if (!userId || !otpCode) {
-      return res.status(400).json({ message: 'User ID and verification code are required' });
+    if (!email || !/^\d{6}$/.test(String(otpCode || ''))) {
+      return res.status(400).json({ message: 'Email and a valid 6-digit verification code are required.' });
     }
 
-    // Get user
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    const { data: result, error } = await supabase.rpc('verify_and_promote_pending_signup', {
+      p_email: email,
+      p_verification_code_hash: hashVerificationCode(otpCode)
+    });
+    if (error) throw error;
 
-    if (error || !user) {
-      return res.status(404).json({ message: 'User not found' });
+    const statusResponses = {
+      not_found: [404, 'Pending signup not found. Submit the signup form again.'],
+      expired: [410, 'This signup expired. Please submit the signup form again.'],
+      code_expired: [410, 'Verification code expired. Request a new code.'],
+      invalid_code: [400, 'Invalid verification code.'],
+      attempts_exceeded: [429, 'Too many incorrect codes. Request a new code to continue.'],
+      account_conflict: [409, 'An account already exists for this email or ID number. Contact support if you need help.']
+    };
+
+    if (result?.status !== 'verified') {
+      const [statusCode, message] = statusResponses[result?.status] || [500, 'Unable to verify this signup.'];
+         return res.status(statusCode).json({
+           message,
+           attemptsExceeded: result?.status === 'attempts_exceeded',
+           restartSignup: result?.status === 'expired' || result?.status === 'not_found'
+         });
     }
-
-    // Check if already verified
-    if (user.is_verified) {
-      return res.status(400).json({ message: 'Email already verified. You can now login.' });
-    }
-
-    // Check verification code
-    if (user.verification_token !== otpCode) {
-      return res.status(400).json({ message: 'Invalid verification code' });
-    }
-
-    // Check if expired
-    const expiresAt = new Date(user.verification_token_expires);
-    const nowUTC = new Date();
-
-    if (nowUTC.getTime() > expiresAt.getTime()) {
-      return res.status(400).json({ message: 'Verification code has expired. Please request a new one.' });
-    }
-
-    // Update user as verified
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        is_verified: true,
-        verified_at: new Date().toISOString(),
-        verification_token: null,
-        verification_token_expires: null
-      })
-      .eq('id', userId);
-
-    if (updateError) throw updateError;
 
     // Send welcome email
-    const fullName = `${user.first_name} ${user.last_name}`;
-    await sendWelcomeEmail(user.email, fullName).catch(err => console.log('Welcome email failed:', err.message));
+    await sendWelcomeEmail(result.email, `${result.firstName} ${result.lastName}`).catch(err => console.log('Welcome email failed:', err.message));
 
-    console.log('✅ Email verified for user:', userId);
+    console.log('Email verified for newly created user:', result.userId);
 
-    res.status(200).json({
+    return res.status(200).json({
       message: 'Email verified successfully! You can now login.',
       verified: true
     });
@@ -296,54 +402,38 @@ export const verifyEmail = async (req, res) => {
 // =============================================
 export const resendVerificationCode = async (req, res) => {
   try {
-    const { userId } = req.body;
+    const email = normalizeEmail(req.body.email);
+    const { password } = req.body;
 
-    if (!userId) {
-      return res.status(400).json({ message: 'User ID is required' });
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required.' });
     }
 
-    // Get user
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    const { data: pending, error: pendingError } = await findPendingSignupByEmail(email);
+    if (pendingError) throw pendingError;
+    if (!pending) return res.status(401).json({ message: 'Invalid email or password.' });
 
-    if (error || !user) {
-      return res.status(404).json({ message: 'User not found' });
+    const passwordMatches = await comparePassword(password, pending.password_hash);
+    if (!passwordMatches) return res.status(401).json({ message: 'Invalid email or password.' });
+
+    const resend = await requestPendingResend(email);
+    if (resend.status === 'cooldown') {
+      return res.status(429).json({ message: 'Please wait before requesting another code.', retryAfterSeconds: resend.retryAfterSeconds });
+    }
+    if (resend.status === 'rate_limited') {
+      return res.status(429).json({
+        message: 'The verification resend limit has been reached. Try again later.',
+        retryAfterSeconds: resend.retryAfterSeconds
+      });
+    }
+       if (resend.status === 'expired' || resend.status === 'not_found') {
+         return res.status(410).json({ message: 'This pending signup expired. Submit the signup form again.', restartSignup: true });
+    }
+    if (resend.status === 'delivery_failed') {
+      return res.status(503).json({ message: 'Your signup is saved, but we could not send the verification email. Please retry shortly.', retryAfterSeconds: 60 });
     }
 
-    // Check if already verified
-    if (user.is_verified) {
-      return res.status(400).json({ message: 'Email already verified. You can now login.' });
-    }
-
-    // Generate new verification code
-    const newCode = generateOTP();
-    const nowUTC = new Date();
-    const expiresAtUTC = new Date(nowUTC.getTime() + 30 * 60 * 1000); // 30 minutes
-
-    // Update user with new code
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        verification_token: newCode,
-        verification_token_expires: expiresAtUTC.toISOString()
-      })
-      .eq('id', userId);
-
-    if (updateError) throw updateError;
-
-    // Send new verification email
-    const fullName = `${user.first_name} ${user.last_name}`;
-    await sendVerificationEmail(user.email, newCode, fullName).catch(err => console.log('Verification email failed:', err.message));
-
-    console.log('📧 Resent verification code to:', user.email);
-
-    res.status(200).json({
-      message: 'New verification code sent to your email',
-      userId: userId
-    });
+    return res.status(200).json({ message: 'A new verification code was sent to your email.', retryAfterSeconds: 60 });
 
   } catch (err) {
     console.error('Resend verification error:', err);
@@ -356,30 +446,61 @@ export const resendVerificationCode = async (req, res) => {
 // =============================================
 export const login = async (req, res) => {
   try {
-    const { id_number, password } = req.body;
+    const idNumber = normalizeIdNumber(req.body.id_number);
+    const { password } = req.body;
+
+    if (!idNumber || !password) {
+      return res.status(400).json({ message: 'ID number and password are required.' });
+    }
 
     const { data, error } = await supabase
       .from('users')
       .select('*')
-      .eq('id_number', id_number)
-      .single();
+      .eq('id_number', idNumber)
+      .maybeSingle();
 
-    if (error || !data) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
+    if (error) throw error;
 
-    // Check if email is verified
-    if (!data.is_verified) {
-      return res.status(403).json({ 
-        message: 'Please verify your email first. Check your inbox for the verification code.',
+    if (!data) {
+      const { data: pending, error: pendingError } = await supabase
+        .from('pending_signups')
+        .select('email, password_hash')
+        .eq('id_number', idNumber)
+        .maybeSingle();
+      if (pendingError) throw pendingError;
+
+      if (!pending || !(await comparePassword(password, pending.password_hash))) {
+        return res.status(401).json({ message: 'Invalid credentials' });
+      }
+
+      const resend = await requestPendingResend(pending.email);
+      if (resend.status === 'expired' || resend.status === 'not_found') {
+        return res.status(410).json({ message: 'This pending signup expired. Submit the signup form again.', restartSignup: true });
+      }
+      const retryAfterSeconds = resend.retryAfterSeconds || 60;
+      const message = resend.status === 'delivery_failed'
+        ? 'Your signup is still pending, but the verification email could not be sent. Please retry shortly.'
+        : resend.status === 'rate_limited'
+          ? 'Your signup is still pending. The resend limit has been reached; try again later.'
+          : resend.status === 'cooldown'
+            ? 'Your signup is still pending. Use the latest code in your inbox or wait before requesting another.'
+            : 'Your signup is still pending. Check your email for a verification code.';
+      return res.status(403).json({
+        message,
         requiresVerification: true,
-        userId: data.id
+        deliveryFailed: resend.status === 'delivery_failed',
+        email: pending.email,
+        retryAfterSeconds
       });
     }
 
     const isValid = await comparePassword(password, data.password_hash);
     if (!isValid) {
       return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    if (!data.is_verified) {
+      return res.status(409).json({ message: 'This account was created before the signup update and must be restarted. Contact support to clear the unverified record.' });
     }
 
     const token = generateToken({
@@ -434,7 +555,7 @@ export const requestPasswordReset = async (req, res) => {
       });
     }
 
-    const otpCode = generateOTP();
+    const otpCode = generateVerificationCode();
     
     const nowUTC = new Date();
     const expiresAtUTC = new Date(nowUTC.getTime() + 30 * 60 * 1000);
@@ -501,7 +622,6 @@ export const verifyResetOTP = async (req, res) => {
     
     console.log('🔍 OTP Verification Check (UTC):', {
       userId: userId,
-      otpCode: otpCode,
       expires_at: expiresAt.toISOString(),
       now_utc: nowUTC.toISOString(),
       isExpired: nowUTC.getTime() > expiresAt.getTime(),
@@ -517,13 +637,12 @@ export const verifyResetOTP = async (req, res) => {
       .update({ is_used: true })
       .eq('id', otpRecord.id);
 
-    const resetToken = generateOTP();
+    const resetToken = generateVerificationCode();
     const nowUTC2 = new Date();
     const resetTokenExpiresUTC = new Date(nowUTC2.getTime() + 120 * 60 * 1000);
     
     console.log('🔐 Reset Token Created (UTC):', {
       userId: userId,
-      resetToken: resetToken,
       now_utc: nowUTC2.toISOString(),
       expires_at_utc: resetTokenExpiresUTC.toISOString()
     });

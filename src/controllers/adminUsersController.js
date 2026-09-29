@@ -122,7 +122,7 @@ export const addAdminUser = async (req, res) => {
           <p><strong>Username:</strong> ${username}</p>
           <p><strong>Email:</strong> ${email}</p>
           <p><strong>Temporary Password:</strong> ${tempPassword}</p>
-          <p><strong>Assigned Department:</strong> ${departmentDisplay}</p>
+     
         </div>
         <p>Please change your password after first login.</p>
         <a href="${adminAppUrl}/login" style="display: inline-block; background: #1B5E20; color: white; padding: 10px 20px; text-decoration: none; border-radius: 8px; margin-top: 10px;">Go to Admin Login</a>

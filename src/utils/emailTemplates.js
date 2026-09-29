@@ -119,17 +119,14 @@ export const getReadyTemplate = (data) => {
             <td style="padding: 8px 0; color: #666;">Document:</td>
             <td style="padding: 8px 0; font-weight: bold;">${documentType}</td>
           </tr>
-          <tr>
-            <td style="padding: 8px 0; color: #666;">Amount to Pay:</td>
-            <td style="padding: 8px 0; font-weight: bold; color: #1B5E20;">${amount === 'Not recorded' ? amount : `₱${amount}`}</td>
-          </tr>
+         
         </table>
       </div>
       
       <div style="margin: 20px 0;">
         <h4 style="color: #333;">📍 CLAIMING PROCESS:</h4>
         <ol style="color: #666; padding-left: 20px;">
-          <li><strong>Go to Cashier Office</strong> - Pay ${amount === 'Not recorded' ? amount : `₱${amount}`} and get Official Receipt</li>
+     
           <li><strong>Go to Registrar Office</strong> - Present Official Receipt and Valid ID</li>
           <li><strong>Sign release form</strong> and claim your document</li>
         </ol>
